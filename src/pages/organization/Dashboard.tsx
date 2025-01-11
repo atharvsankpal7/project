@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { useSelector } from 'react-redux';
+import { useState, useEffect } from "react";
+import { useSelector } from "react-redux";
 import {
   Box,
   Grid,
@@ -9,16 +9,14 @@ import {
   TextField,
   Chip,
   List,
-  ListItem,
-  ListItemText,
-  ListItemSecondary,
   Dialog,
   DialogTitle,
   DialogContent,
   DialogActions,
-} from '@mui/material';
-import { Search, FileCheck, BarChart2, Clock, User, Award } from 'lucide-react';
-import { Line } from 'react-chartjs-2';
+  Badge,
+} from "@mui/material";
+import { Search, FileCheck, BarChart2, Clock, Bell } from "lucide-react";
+import { Line } from "react-chartjs-2";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -27,11 +25,11 @@ import {
   LineElement,
   Title,
   Tooltip,
-  Legend
-} from 'chart.js';
-import { useIndexedDB } from '../../hooks/useIndexedDB';
-import { RootState } from '../../store';
-import toast from 'react-hot-toast';
+  Legend,
+} from "chart.js";
+import { useIndexedDB } from "../../hooks/useIndexedDB";
+import { RootState } from "../../store";
+import toast from "react-hot-toast";
 
 ChartJS.register(
   CategoryScale,
@@ -46,196 +44,182 @@ ChartJS.register(
 const OrganizationDashboard = () => {
   const { user } = useSelector((state: RootState) => state.auth);
   const { db, getAccessRequestsByStatus, addAccessRequest } = useIndexedDB();
-  const [searchQuery, setSearchQuery] = useState('');
-  const [candidates, setCandidates] = useState<any[]>([]);
-  const [selectedCandidate, setSelectedCandidate] = useState<any>(null);
-  const [certificates, setCertificates] = useState<any[]>([]);
+  const [certificateId, setCertificateId] = useState("");
   const [verifiedCertificates, setVerifiedCertificates] = useState<any[]>([]);
-  const [dialogOpen, setDialogOpen] = useState(false);
+  const [notificationOpen, setNotificationOpen] = useState(false);
+  const [notifications, setNotifications] = useState<any[]>([]);
   const [stats, setStats] = useState({
     totalVerifications: 0,
     successRate: 0,
-    pendingRequests: 0
+    pendingRequests: 0,
   });
 
   useEffect(() => {
     const fetchData = async () => {
       if (user?.id) {
-        const requests = await getAccessRequestsByStatus('approved');
-        const verifiedCerts = requests.filter(req => req.requesterId === user.id);
-        setVerifiedCertificates(verifiedCerts);
-        
-        const pending = await getAccessRequestsByStatus('pending');
-        const pendingCount = pending.filter(req => req.requesterId === user.id).length;
-        
+        const [approved, denied, pending] = await Promise.all([
+          getAccessRequestsByStatus("approved"),
+          getAccessRequestsByStatus("denied"),
+          getAccessRequestsByStatus("pending"),
+        ]);
+
+        const orgApproved = approved.filter(
+          (req) => req.requesterId === user.id
+        );
+        const orgDenied = denied.filter((req) => req.requesterId === user.id);
+        const orgPending = pending.filter((req) => req.requesterId === user.id);
+
+        setVerifiedCertificates(orgApproved);
+
+        const allNotifications = [...orgApproved, ...orgDenied]
+          .sort(
+            (a, b) =>
+              new Date(b.requestDate).getTime() -
+              new Date(a.requestDate).getTime()
+          )
+          .slice(0, 10);
+        setNotifications(allNotifications);
+
+        const total = orgApproved.length + orgDenied.length;
         setStats({
-          totalVerifications: verifiedCerts.length,
-          successRate: verifiedCerts.length > 0 ? 
-            Math.round((verifiedCerts.length / (verifiedCerts.length + pendingCount)) * 100) : 0,
-          pendingRequests: pendingCount
+          totalVerifications: orgApproved.length,
+          successRate:
+            total > 0 ? Math.round((orgApproved.length / total) * 100) : 0,
+          pendingRequests: orgPending.length,
         });
       }
     };
 
     fetchData();
+
+    const interval = setInterval(fetchData, 30000);
+    return () => clearInterval(interval);
   }, [user?.id, getAccessRequestsByStatus]);
 
-  const searchCandidates = async () => {
-    if (!searchQuery.trim() || !db) {
-      setCandidates([]);
+  const handleVerify = async () => {
+    if (!certificateId.trim()) {
+      toast.error("Please enter a certificate ID");
       return;
     }
 
     try {
-      const tx = db.transaction('users', 'readonly');
-      const userStore = tx.store;
-      const candidateIndex = userStore.index('by-role');
-      const allCandidates = await candidateIndex.getAll('candidate');
-      
-      // Filter candidates based on search query
-      const filteredCandidates = allCandidates.filter(candidate =>
-        candidate.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        candidate.email.toLowerCase().includes(searchQuery.toLowerCase())
-      );
-      
-      setCandidates(filteredCandidates);
-    } catch (error) {
-      console.error('Error searching candidates:', error);
-      toast.error('Failed to search candidates');
-    }
-  };
-
-  const handleCandidateSelect = async (candidate: any) => {
-    setSelectedCandidate(candidate);
-    try {
-      if (!db) return;
-      
-      const tx = db.transaction('certificates', 'readonly');
-      const certStore = tx.store;
-      const candidateCerts = await certStore.index('by-candidate').getAll(candidate.id);
-      setCertificates(candidateCerts);
-      setDialogOpen(true);
-    } catch (error) {
-      console.error('Error fetching certificates:', error);
-      toast.error('Failed to fetch candidate certificates');
-    }
-  };
-
-  const requestAccess = async (certificateId: string) => {
-    if (!user?.id || !selectedCandidate) return;
-
-    try {
-      // Check if request already exists
-      const existingRequests = await getAccessRequestsByStatus('pending');
-      const hasExisting = existingRequests.some(
-        req => req.certificateId === certificateId && req.requesterId === user.id
-      );
-
-      if (hasExisting) {
-        toast.error('Access request already pending');
+      const cert = await db?.get("certificates", certificateId);
+      if (!cert) {
+        toast.error("Certificate not found");
         return;
       }
 
       const request = {
         id: crypto.randomUUID(),
         certificateId,
-        requesterId: user.id,
-        status: 'pending',
-        requestDate: new Date().toISOString()
+        requesterId: user?.id || "",
+        status: "pending" as const,
+        requestDate: new Date().toISOString(),
       };
 
       await addAccessRequest(request);
-      toast.success('Access request sent successfully');
-      setStats(prev => ({
+      toast.success("Verification request submitted successfully");
+      setCertificateId("");
+
+      setStats((prev) => ({
         ...prev,
-        pendingRequests: prev.pendingRequests + 1
+        pendingRequests: prev.pendingRequests + 1,
       }));
     } catch (error) {
-      console.error('Error requesting access:', error);
-      toast.error('Failed to send access request');
+      toast.error("Failed to submit verification request");
     }
   };
 
   const chartData = {
-    labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'],
-    datasets: [{
-      label: 'Verification Requests',
-      data: Array(6).fill(0).map((_, i) => {
-        const month = new Date().getMonth() - (5 - i);
-        return verifiedCertificates.filter(cert => {
-          const certDate = new Date(cert.requestDate);
-          return certDate.getMonth() === month;
-        }).length;
-      }),
-      borderColor: 'rgb(75, 192, 192)',
-      tension: 0.1,
-    }],
+    labels: ["Jan", "Feb", "Mar", "Apr", "May", "Jun"],
+    datasets: [
+      {
+        label: "Verification Requests",
+        data: Array(6)
+          .fill(0)
+          .map((_, i) => {
+            const month = new Date().getMonth() - (5 - i);
+            return verifiedCertificates.filter((cert) => {
+              const certDate = new Date(cert.requestDate);
+              return certDate.getMonth() === month;
+            }).length;
+          }),
+        borderColor: "rgb(75, 192, 192)",
+        tension: 0.1,
+      },
+    ],
   };
 
   return (
     <Box sx={{ pt: 8 }}>
-      <Typography variant="h4" sx={{ mb: 4 }}>
-        Organization Dashboard
-      </Typography>
+      <Box
+        sx={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          mb: 4,
+        }}
+      >
+        <Typography variant="h4">Organization Dashboard</Typography>
+        <Button
+          startIcon={
+            <Badge badgeContent={notifications.length} color="error">
+              <Bell size={20} />
+            </Badge>
+          }
+          onClick={() => setNotificationOpen(true)}
+          variant="outlined"
+        >
+          Notifications
+        </Button>
+      </Box>
 
       <Grid container spacing={3}>
-        {/* Candidate Search */}
         <Grid item xs={12}>
           <Paper sx={{ p: 3 }}>
             <Typography variant="h6" sx={{ mb: 3 }}>
-              Search Candidates
+              Verify Certificate
             </Typography>
-            <Box sx={{ display: 'flex', gap: 2 }}>
+            <Box
+              component="form"
+              sx={{
+                display: "flex",
+                gap: 2,
+                flexWrap: "wrap",
+              }}
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleVerify();
+              }}
+            >
               <TextField
-                fullWidth
-                label="Search by name or email"
+                label="Certificate ID"
                 variant="outlined"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && searchCandidates()}
+                size="small"
+                value={certificateId}
+                onChange={(e) => setCertificateId(e.target.value)}
+                sx={{ flexGrow: 1 }}
               />
               <Button
                 variant="contained"
                 startIcon={<Search size={20} />}
-                onClick={searchCandidates}
+                onClick={handleVerify}
               >
-                Search
+                Verify
               </Button>
             </Box>
-
-            {candidates.length > 0 && (
-              <List sx={{ mt: 2 }}>
-                {candidates.map((candidate) => (
-                  <ListItem
-                    key={candidate.id}
-                    sx={{
-                      border: '1px solid',
-                      borderColor: 'divider',
-                      borderRadius: 1,
-                      mb: 1,
-                    }}
-                  >
-                    <ListItemText
-                      primary={candidate.name}
-                      secondary={candidate.email}
-                    />
-                    <Button
-                      variant="outlined"
-                      startIcon={<User size={16} />}
-                      onClick={() => handleCandidateSelect(candidate)}
-                    >
-                      View Certificates
-                    </Button>
-                  </ListItem>
-                ))}
-              </List>
-            )}
           </Paper>
         </Grid>
 
-        {/* Stats Cards */}
         <Grid item xs={12} md={4}>
-          <Paper sx={{ p: 3, display: 'flex', alignItems: 'center', gap: 2 }}>
+          <Paper
+            sx={{
+              p: 3,
+              display: "flex",
+              alignItems: "center",
+              gap: 2,
+            }}
+          >
             <FileCheck size={40} className="text-blue-500" />
             <Box>
               <Typography variant="h6">Total Verifications</Typography>
@@ -245,7 +229,14 @@ const OrganizationDashboard = () => {
         </Grid>
 
         <Grid item xs={12} md={4}>
-          <Paper sx={{ p: 3, display: 'flex', alignItems: 'center', gap: 2 }}>
+          <Paper
+            sx={{
+              p: 3,
+              display: "flex",
+              alignItems: "center",
+              gap: 2,
+            }}
+          >
             <BarChart2 size={40} className="text-green-500" />
             <Box>
               <Typography variant="h6">Success Rate</Typography>
@@ -255,7 +246,14 @@ const OrganizationDashboard = () => {
         </Grid>
 
         <Grid item xs={12} md={4}>
-          <Paper sx={{ p: 3, display: 'flex', alignItems: 'center', gap: 2 }}>
+          <Paper
+            sx={{
+              p: 3,
+              display: "flex",
+              alignItems: "center",
+              gap: 2,
+            }}
+          >
             <Clock size={40} className="text-orange-500" />
             <Box>
               <Typography variant="h6">Pending Requests</Typography>
@@ -264,7 +262,6 @@ const OrganizationDashboard = () => {
           </Paper>
         </Grid>
 
-        {/* Analytics Chart */}
         <Grid item xs={12}>
           <Paper sx={{ p: 3 }}>
             <Line
@@ -272,11 +269,11 @@ const OrganizationDashboard = () => {
                 responsive: true,
                 plugins: {
                   legend: {
-                    position: 'top' as const,
+                    position: "top" as const,
                   },
                   title: {
                     display: true,
-                    text: 'Verification Request Trend',
+                    text: "Verification Request Trend",
                   },
                 },
               }}
@@ -285,85 +282,122 @@ const OrganizationDashboard = () => {
           </Paper>
         </Grid>
 
-        {/* Verified Certificates */}
         <Grid item xs={12}>
           <Paper sx={{ p: 3 }}>
             <Typography variant="h6" sx={{ mb: 2 }}>
               Recently Verified Certificates
             </Typography>
-            <List>
+            <Grid container spacing={2}>
               {verifiedCertificates.slice(0, 5).map((cert) => (
-                <ListItem
-                  key={cert.id}
-                  sx={{
-                    border: '1px solid',
-                    borderColor: 'divider',
-                    borderRadius: 1,
-                    mb: 1,
-                  }}
-                >
-                  <ListItemText
-                    primary={`Certificate ID: ${cert.certificateId}`}
-                    secondary={`Verified on: ${new Date(cert.requestDate).toLocaleDateString()}`}
-                  />
-                  <Chip label="Verified" color="success" size="small" />
-                </ListItem>
+                <Grid item xs={12} key={cert.id}>
+                  <Paper
+                    variant="outlined"
+                    sx={{
+                      p: 2,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                    }}
+                  >
+                    <Box>
+                      <Typography variant="body1">
+                        Certificate ID: {cert.certificateId}
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        Verified on:{" "}
+                        {new Date(cert.requestDate).toLocaleDateString()}
+                      </Typography>
+                    </Box>
+                    <Box
+                      sx={{
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "flex-end",
+                      }}
+                    >
+                      <Chip
+                        label="Verified"
+                        color="success"
+                        size="small"
+                        sx={{ mb: 1 }}
+                      />
+                    </Box>
+                  </Paper>
+                </Grid>
               ))}
               {verifiedCertificates.length === 0 && (
-                <Typography color="text.secondary" textAlign="center">
-                  No certificates verified yet
-                </Typography>
+                <Grid item xs={12}>
+                  <Typography color="text.secondary" textAlign="center">
+                    No certificates verified yet
+                  </Typography>
+                </Grid>
               )}
-            </List>
+            </Grid>
           </Paper>
         </Grid>
       </Grid>
 
-      {/* Certificate Dialog */}
       <Dialog
-        open={dialogOpen}
-        onClose={() => setDialogOpen(false)}
-        maxWidth="md"
+        open={notificationOpen}
+        onClose={() => setNotificationOpen(false)}
+        maxWidth="sm"
         fullWidth
       >
-        <DialogTitle>
-          Certificates for {selectedCandidate?.name}
-        </DialogTitle>
+        <DialogTitle>Access Request Notifications</DialogTitle>
         <DialogContent>
-          {certificates.length > 0 ? (
+          {notifications.length > 0 ? (
             <List>
-              {certificates.map((cert) => (
-                <ListItem
-                  key={cert.id}
+              {notifications.map((notification) => (
+                <Paper
+                  key={notification.id}
                   sx={{
-                    border: '1px solid',
-                    borderColor: 'divider',
+                    p: 2,
+                    mb: 2,
+                    border: "1px solid",
+                    borderColor: "divider",
                     borderRadius: 1,
-                    mb: 1,
                   }}
                 >
-                  <ListItemText
-                    primary={cert.title}
-                    secondary={`Issued: ${new Date(cert.issueDate).toLocaleDateString()}`}
-                  />
-                  <Button
-                    variant="contained"
-                    startIcon={<Award size={16} />}
-                    onClick={() => requestAccess(cert.id)}
-                  >
-                    Request Access
-                  </Button>
-                </ListItem>
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+                    {notification.status === "approved" ? (
+                      <FileCheck size={20} className="text-green-500" />
+                    ) : (
+                      <Clock size={20} className="text-red-500" />
+                    )}
+                    <Box>
+                      <Typography variant="body1">
+                        Certificate Access Request {notification.status}
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        {new Date(
+                          notification.updateDate || notification.requestDate
+                        ).toLocaleString()}
+                      </Typography>
+                    </Box>
+                    <Chip
+                      label={notification.status}
+                      color={
+                        notification.status === "approved" ? "success" : "error"
+                      }
+                      size="small"
+                      sx={{ ml: "auto" }}
+                    />
+                  </Box>
+                </Paper>
               ))}
             </List>
           ) : (
-            <Typography color="text.secondary" textAlign="center">
-              No certificates found for this candidate
+            <Typography
+              color="text.secondary"
+              textAlign="center"
+              sx={{ py: 3 }}
+            >
+              No notifications yet
             </Typography>
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setDialogOpen(false)}>Close</Button>
+          <Button onClick={() => setNotificationOpen(false)}>Close</Button>
         </DialogActions>
       </Dialog>
     </Box>
