@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { Provider } from 'react-redux';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { store } from './store';
@@ -11,8 +12,14 @@ import CandidateDashboard from './pages/candidate/Dashboard';
 import OrganizationDashboard from './pages/organization/Dashboard';
 import Login from './pages/auth/Login';
 import ProtectedRoute from './components/ProtectedRoute';
+import { initDB } from './lib/db';
 
 function App() {
+  useEffect(() => {
+    // Initialize the database when the app starts
+    initDB().catch(console.error);
+  }, []);
+
   return (
     <Provider store={store}>
       <ErrorBoundary>
